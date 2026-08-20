@@ -226,7 +226,11 @@ def api_debug2():
     """Endpoint TEMPORÁRIO: roda a lógica de busca real e devolve só
     contagens/diagnósticos (sem despejar HTML inteiro), pra investigar
     por que buscar_url_produto() não está achando link. Remover depois."""
-    modelo = (request.args.get("modelo") or "iPhone 16 Pro").strip()
+    import time
+    import uuid
+
+    modelo_recebido = request.args.get("modelo")
+    modelo = (modelo_recebido or "iPhone 16 Pro").strip()
     query = f"site:tudocelular.com fichas-tecnicas {modelo}"
     url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
     try:
@@ -240,8 +244,14 @@ def api_debug2():
     decodificados = [unquote(u) for u in uddgs[:10]]
     achados_apos_decode = [d for d in decodificados if TUDOCELULAR_LINK_RE.findall(d)]
 
-    return jsonify(
+    body = jsonify(
         ok=True,
+        execucao_id=str(uuid.uuid4()),  # prova de que essa execução não é cache
+        timestamp=time.time(),
+        query_string_bruta=request.query_string.decode(),
+        modelo_recebido_no_request=modelo_recebido,
+        modelo_usado=modelo,
+        url_duckduckgo_montada=url,
         status_code=resp.status_code,
         tamanho_html=len(html),
         contem_palavra_tudocelular=("tudocelular" in html.lower()),
@@ -252,6 +262,8 @@ def api_debug2():
         qtd_achados_apos_decode=len(achados_apos_decode),
         resultado_final=buscar_url_produto(modelo),
     )
+    body.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return body
 
 
 @app.get("/")
