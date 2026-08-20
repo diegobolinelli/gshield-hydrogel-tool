@@ -3,21 +3,32 @@ GShield - Gerador de imagem Hydrogel + foto do celular
 
 Fluxo:
   1) /api/buscar?modelo=... -> tenta encontrar automaticamente uma foto do
-     celular no tudocelular.com (best-effort, pode falhar/ser bloqueado).
+     celular no GSMArena.com (best-effort, pode falhar).
   2) /api/compor -> recebe uma imagem do celular (vinda da busca automática
      OU enviada manualmente pelo usuário) e gera o JPG final, celular ao
      lado da embalagem do hydrogel.
 
 IMPORTANTE (leia antes de mexer no scraping):
-  - A busca automática (etapa 1) é uma tentativa razoável, não uma
-    garantia. Ela usa a busca HTML do DuckDuckGo (com "site:tudocelular.com")
-    para achar a página do modelo, e depois lê a tag <meta property="og:image">
-    dessa página.
-  - Se algo nessa cadeia quebrar (site mudou o HTML, bloqueou o IP do
-    servidor, DuckDuckGo mudou o formato, etc.), o endpoint retorna
-    ok:false com um motivo, e a interface cai automaticamente no modo
-    manual (a pessoa cola/envia a foto do celular à mão). Esse modo
-    manual não depende de scraping nenhum e sempre funciona.
+  - Testamos primeiro o tudocelular.com: ele bloqueia acesso automatizado
+    (HTTP 403, confirmado mesmo com cabeçalhos de navegador). Trocamos
+    pro GSMArena.com, que é o catálogo mais completo (qualquer marca,
+    qualquer país) e que, nos testes feitos, respondeu normalmente às
+    páginas de ficha técnica sem bloqueio.
+  - A busca em si usa o DuckDuckGo (com "site:gsmarena.com") pra achar a
+    página do modelo, porque a busca interna do próprio GSMArena é
+    protegida por um Cloudflare Turnstile (captcha) e não dá pra automatizar.
+  - Mesmo assim, isso é uma tentativa razoável, não uma garantia: sites
+    podem mudar de estrutura ou passar a bloquear a qualquer momento. Se
+    algo nessa cadeia quebrar, o endpoint retorna ok:false com um motivo,
+    e a interface cai automaticamente no modo manual (a pessoa cola/envia
+    a foto do celular à mão). Esse modo manual não depende de scraping
+    nenhum e sempre funciona.
+  - Lembrete de direitos autorais: as fotos vêm de fichas técnicas de
+    terceiros (fotos de imprensa dos fabricantes, redistribuídas pelo
+    GSMArena). Usar essas imagens numa peça comercial (embalagem/anúncio)
+    pode ter implicações de direitos autorais que não fui capaz de avaliar
+    com certeza — vale considerar checar isso com alguém da área jurídica
+    se for um uso em maior escala.
 """
 
 import base64
@@ -76,9 +87,30 @@ OG_IMAGE_RE = re.compile(
     r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
     re.IGNORECASE,
 )
+
+# O tudocelular.com bloqueia acesso automatizado (confirmado: 403 mesmo com
+# cabeçalhos de navegador). Trocamos a fonte pro GSMArena, que é o catálogo
+# mais completo que existe (cobre lançamentos de qualquer marca/país) e,
+# ao contrário do tudocelular, não bloqueou nenhuma das páginas de ficha
+# técnica testadas (só a *busca interna* dele é protegida por Cloudflare
+# Turnstile — por isso usamos o DuckDuckGo pra achar a página, igual antes).
 TUDOCELULAR_LINK_RE = re.compile(
     r'https?://(?:www\.)?tudocelular\.com/[^\s"\'<>]*fichas-tecnicas[^\s"\'<>]*\.html'
 )
+GSMARENA_LINK_RE = re.compile(
+    r'https?://(?:www\.)?gsmarena\.com/[a-zA-Z0-9_]+-\d+\.php'
+)
+# Páginas do GSMArena que NÃO são a ficha técnica principal (comparação,
+# galeria de fotos, review, notícia) — descartar se o link cair nelas.
+GSMARENA_EXCLUIR = ("-pictures-", "-review", "compare.php3", "-news-", "-vs-", "glossary")
+
+# Foto principal do produto no GSMArena fica dentro de
+# <div class="specs-photo-main"><a ...><img ... src=URL></a></div>
+# (às vezes sem aspas no atributo src, por isso o regex aceita os dois casos).
+GSMARENA_PHOTO_RE = re.compile(
+    r'specs-photo-main.*?<img[^>]+src=["\']?([^"\'>\s]+)', re.IGNORECASE | re.DOTALL
+)
+
 # O DuckDuckGo (versão HTML) não linka direto pro site: ele embrulha a URL
 # de destino dentro de um link de redirecionamento próprio, tipo
 # "//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.tudocelular.com%2F...&rut=...".
@@ -115,42 +147,54 @@ def compose_image(phone_bytes: bytes) -> Image.Image:
 
 
 # ---------------------------------------------------------------------------
-# Busca automática (best-effort) no tudocelular.com
+# Busca automática (best-effort) no GSMArena
 # ---------------------------------------------------------------------------
 
 
+def _extrair_link_gsmarena(texto: str) -> str | None:
+    for candidato in GSMARENA_LINK_RE.findall(texto):
+        if not any(ruim in candidato.lower() for ruim in GSMARENA_EXCLUIR):
+            return candidato
+    return None
+
+
 def buscar_url_produto(modelo: str) -> str | None:
-    """Usa a busca HTML do DuckDuckGo (site:tudocelular.com) para achar a
-    página de ficha técnica do modelo pesquisado. Retorna a URL ou None."""
-    query = f"site:tudocelular.com fichas-tecnicas {modelo}"
+    """Usa a busca HTML do DuckDuckGo (site:gsmarena.com) para achar a
+    página de ficha técnica do modelo pesquisado no GSMArena. Retorna a
+    URL ou None. (A busca interna do próprio GSMArena é protegida por
+    Cloudflare Turnstile, por isso passamos pelo DuckDuckGo.)"""
+    query = f"site:gsmarena.com {modelo} specifications"
     url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
     resp = requests.get(url, headers=REQUEST_HEADERS, timeout=10)
     resp.raise_for_status()
 
     # 1) tenta achar um link direto (sem embrulho)
-    matches = TUDOCELULAR_LINK_RE.findall(resp.text)
-    if matches:
-        return matches[0]
+    encontrado = _extrair_link_gsmarena(resp.text)
+    if encontrado:
+        return encontrado
 
     # 2) tenta achar dentro do parâmetro uddg= do link de redirecionamento
     #    do DuckDuckGo, decodificando a URL antes de procurar o padrão
     for wrapped in DUCKDUCKGO_UDDG_RE.findall(resp.text):
         decoded = unquote(wrapped)
-        found = TUDOCELULAR_LINK_RE.findall(decoded)
-        if found:
-            return found[0]
+        encontrado = _extrair_link_gsmarena(decoded)
+        if encontrado:
+            return encontrado
 
     return None
 
 
 def baixar_imagem_produto(url_produto: str) -> bytes | None:
-    """Abre a página do produto e extrai a imagem principal (og:image)."""
+    """Abre a página do produto no GSMArena e extrai a foto principal de
+    dentro da div class="specs-photo-main"."""
     resp = requests.get(url_produto, headers=TUDOCELULAR_HEADERS, timeout=10)
     resp.raise_for_status()
-    match = OG_IMAGE_RE.search(resp.text)
+    match = GSMARENA_PHOTO_RE.search(resp.text)
     if not match:
         return None
     img_url = match.group(1)
+    if img_url.startswith("//"):
+        img_url = "https:" + img_url
     img_resp = requests.get(img_url, headers=TUDOCELULAR_HEADERS, timeout=10)
     img_resp.raise_for_status()
     return img_resp.content
@@ -214,6 +258,102 @@ def api_compor():
     resultado.save(buffer, format="JPEG", quality=92)
     buffer.seek(0)
     return send_file(buffer, mimetype="image/jpeg", download_name="gshield-hydrogel.jpg")
+
+
+@app.get("/api/debug4/<tag>")
+def api_debug4(tag):
+    """Endpoint TEMPORÁRIO: roda a busca real no GSMArena (via DuckDuckGo)
+    e devolve fatos já calculados no servidor (não HTML bruto), pra não
+    depender de um modelo externo tentando "ler" o HTML — isso se mostrou
+    pouco confiável em testes anteriores. Remover depois."""
+    import time
+    import uuid
+
+    modelo_recebido = request.args.get("modelo")
+    modelo = (modelo_recebido or "iPhone 16 Pro Max").strip()
+    query = f"site:gsmarena.com {modelo} specifications"
+    url_ddg = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+
+    try:
+        resp = requests.get(url_ddg, headers=REQUEST_HEADERS, timeout=15)
+    except requests.exceptions.RequestException as exc:
+        return jsonify(ok=False, etapa="duckduckgo", motivo=f"{exc.__class__.__name__}: {exc}")
+
+    html = resp.text
+    html_lower = html.lower()
+
+    diretos = GSMARENA_LINK_RE.findall(html)
+    uddgs = DUCKDUCKGO_UDDG_RE.findall(html)
+    decodificados = [unquote(u) for u in uddgs[:10]]
+    achados_apos_decode = []
+    for d in decodificados:
+        achados_apos_decode.extend(GSMARENA_LINK_RE.findall(d))
+
+    url_produto = None
+    erro_busca = None
+    try:
+        url_produto = buscar_url_produto(modelo)
+    except Exception as exc:  # noqa: BLE001
+        erro_busca = f"{exc.__class__.__name__}: {exc}"
+
+    pagina_produto_status = None
+    photo_regex_bateu = False
+    contexto_specs_photo = None
+    imagem_ok = False
+    imagem_tamanho_bytes = None
+    erro_imagem = None
+
+    if url_produto:
+        try:
+            resp_produto = requests.get(url_produto, headers=TUDOCELULAR_HEADERS, timeout=15)
+            pagina_produto_status = resp_produto.status_code
+            resp_produto.raise_for_status()
+            texto_produto = resp_produto.text
+            match_photo = GSMARENA_PHOTO_RE.search(texto_produto)
+            photo_regex_bateu = bool(match_photo)
+            pos = texto_produto.lower().find("specs-photo-main")
+            if pos != -1:
+                contexto_specs_photo = texto_produto[pos: pos + 300]
+            if match_photo:
+                img_url = match_photo.group(1)
+                if img_url.startswith("//"):
+                    img_url = "https:" + img_url
+                img_resp = requests.get(img_url, headers=TUDOCELULAR_HEADERS, timeout=15)
+                img_resp.raise_for_status()
+                imagem_ok = True
+                imagem_tamanho_bytes = len(img_resp.content)
+        except requests.exceptions.RequestException as exc:
+            erro_imagem = f"{exc.__class__.__name__}: {exc}"
+
+    body = jsonify(
+        ok=True,
+        execucao_id=str(uuid.uuid4()),
+        timestamp=time.time(),
+        modelo_usado=modelo,
+        url_duckduckgo_montada=url_ddg,
+        duckduckgo_status_code=resp.status_code,
+        duckduckgo_tamanho_html=len(html),
+        contem_gsmarena_com=("gsmarena.com" in html_lower),
+        contem_no_results=(
+            "no results" in html_lower
+            or "did not match any documents" in html_lower
+            or "sem resultados" in html_lower
+        ),
+        qtd_links_diretos_gsmarena=len(diretos),
+        qtd_uddg=len(uddgs),
+        qtd_achados_apos_decode=len(achados_apos_decode),
+        primeiros_3_uddg_decodificados=decodificados[:3],
+        url_produto_encontrada=url_produto,
+        erro_na_busca=erro_busca,
+        pagina_produto_status_code=pagina_produto_status,
+        photo_regex_bateu=photo_regex_bateu,
+        contexto_specs_photo_main=contexto_specs_photo,
+        imagem_baixada_com_sucesso=imagem_ok,
+        imagem_tamanho_bytes=imagem_tamanho_bytes,
+        erro_ao_baixar_imagem=erro_imagem,
+    )
+    body.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return body
 
 
 @app.get("/api/debug3/<tag>")
