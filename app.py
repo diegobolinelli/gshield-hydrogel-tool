@@ -221,8 +221,8 @@ def api_debug():
         return jsonify(ok=False, motivo=f"{exc.__class__.__name__}: {exc}")
 
 
-@app.get("/api/debug2")
-def api_debug2():
+@app.get("/api/debug2/<tag>")
+def api_debug2(tag):
     """Endpoint TEMPORÁRIO: roda a lógica de busca real e devolve só
     contagens/diagnósticos (sem despejar HTML inteiro), pra investigar
     por que buscar_url_produto() não está achando link. Remover depois."""
