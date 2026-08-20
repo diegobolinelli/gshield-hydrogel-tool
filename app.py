@@ -46,22 +46,30 @@ CANVAS_SIZE = (2000, 2000)  # medido a partir do arquivo enviado
 # Ajuste aqui se o enquadramento não ficar bom.
 PHONE_BOX = (70, 220, 900, 1780)
 
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+# Cabeçalhos simples pra falar com o DuckDuckGo (só isso, sem firulas —
+# cabeçalhos "bonitos demais"/incoerentes fizeram o DDG desconfiar numa
+# tentativa anterior e devolver uma página vazia).
 REQUEST_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": _UA,
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+}
+
+# Cabeçalhos mais "de navegador" pra falar com o tudocelular.com, com um
+# Referer condizente com a realidade (a pessoa clicou num resultado do
+# DuckDuckGo pra chegar lá).
+TUDOCELULAR_HEADERS = {
+    "User-Agent": _UA,
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/avif,image/webp,image/apng,*/*;q=0.8"
     ),
     "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://www.google.com/",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "cross-site",
-    "Upgrade-Insecure-Requests": "1",
+    "Referer": "https://duckduckgo.com/",
 }
 
 OG_IMAGE_RE = re.compile(
@@ -137,13 +145,13 @@ def buscar_url_produto(modelo: str) -> str | None:
 
 def baixar_imagem_produto(url_produto: str) -> bytes | None:
     """Abre a página do produto e extrai a imagem principal (og:image)."""
-    resp = requests.get(url_produto, headers=REQUEST_HEADERS, timeout=10)
+    resp = requests.get(url_produto, headers=TUDOCELULAR_HEADERS, timeout=10)
     resp.raise_for_status()
     match = OG_IMAGE_RE.search(resp.text)
     if not match:
         return None
     img_url = match.group(1)
-    img_resp = requests.get(img_url, headers=REQUEST_HEADERS, timeout=10)
+    img_resp = requests.get(img_url, headers=TUDOCELULAR_HEADERS, timeout=10)
     img_resp.raise_for_status()
     return img_resp.content
 
@@ -260,12 +268,12 @@ def api_debug2(tag):
     og_image_url = None
     if url_produto:
         try:
-            resp_produto = requests.get(url_produto, headers=REQUEST_HEADERS, timeout=15)
+            resp_produto = requests.get(url_produto, headers=TUDOCELULAR_HEADERS, timeout=15)
             resp_produto.raise_for_status()
             match_og = OG_IMAGE_RE.search(resp_produto.text)
             if match_og:
                 og_image_url = match_og.group(1)
-                img_resp = requests.get(og_image_url, headers=REQUEST_HEADERS, timeout=15)
+                img_resp = requests.get(og_image_url, headers=TUDOCELULAR_HEADERS, timeout=15)
                 img_resp.raise_for_status()
                 imagem_ok = True
                 imagem_tamanho_bytes = len(img_resp.content)
