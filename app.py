@@ -244,6 +244,8 @@ def api_debug3(tag):
         if not any(x in s.lower() for x in ["logo", "amazon", "icon", ".gif", "static/stores"])
     ]
     marcador_specs_photo = "specs-photo" in html_lower
+    pos = html_lower.find("specs-photo")
+    contexto_specs_photo = html[pos : pos + 400] if pos != -1 else None
 
     return jsonify(
         ok=True,
@@ -258,6 +260,7 @@ def api_debug3(tag):
         ],
         og_image=og_match.group(1) if og_match else None,
         marcador_specs_photo_presente=marcador_specs_photo,
+        contexto_specs_photo=contexto_specs_photo,
         total_img_tags=len(img_srcs),
         primeiros_20_img_src=img_srcs[:20],
         img_srcs_relevantes_filtrados=img_srcs_relevantes[:15],
