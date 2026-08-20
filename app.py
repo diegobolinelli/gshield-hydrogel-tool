@@ -9,26 +9,21 @@ Fluxo:
      lado da embalagem do hydrogel.
 
 IMPORTANTE (leia antes de mexer no scraping):
-  Durante o desenvolvimento, toda tentativa de acessar o tudocelular.com
-  a partir daqui (inclusive só a página inicial de fichas técnicas) voltou
-  HTTP 429 (bloqueio de acesso automatizado). Não foi possível confirmar
-  ao vivo a estrutura de busca interna do site nem testar se o servidor
-  publicado (Render) vai ser bloqueado do mesmo jeito. Por isso:
-    - A busca automática (etapa 1) é uma tentativa razoável, não uma
-      garantia. Ela usa a busca HTML do DuckDuckGo (com "site:tudocelular.com")
-      para achar a página do modelo, e depois lê a tag <meta property="og:image">
-      dessa página.
-    - Se algo nessa cadeia quebrar (site mudou o HTML, bloqueou o IP do
-      Render, DuckDuckGo mudou o formato, etc.), o endpoint retorna
-      ok:false com um motivo, e a interface cai automaticamente no modo
-      manual (a pessoa cola/envia a foto do celular à mão). Esse modo
-      manual não depende de scraping nenhum e sempre funciona.
+  - A busca automática (etapa 1) é uma tentativa razoável, não uma
+    garantia. Ela usa a busca HTML do DuckDuckGo (com "site:tudocelular.com")
+    para achar a página do modelo, e depois lê a tag <meta property="og:image">
+    dessa página.
+  - Se algo nessa cadeia quebrar (site mudou o HTML, bloqueou o IP do
+    servidor, DuckDuckGo mudou o formato, etc.), o endpoint retorna
+    ok:false com um motivo, e a interface cai automaticamente no modo
+    manual (a pessoa cola/envia a foto do celular à mão). Esse modo
+    manual não depende de scraping nenhum e sempre funciona.
 """
 
 import base64
 import io
 import re
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import requests
 from flask import Flask, jsonify, request, send_file, send_from_directory
@@ -66,6 +61,11 @@ OG_IMAGE_RE = re.compile(
 TUDOCELULAR_LINK_RE = re.compile(
     r'https?://(?:www\.)?tudocelular\.com/[^\s"\'<>]*fichas-tecnicas[^\s"\'<>]*\.html'
 )
+# O DuckDuckGo (versão HTML) não linka direto pro site: ele embrulha a URL
+# de destino dentro de um link de redirecionamento próprio, tipo
+# "//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.tudocelular.com%2F...&rut=...".
+# Esse regex pega o valor do parâmetro uddg (ainda codificado em URL).
+DUCKDUCKGO_UDDG_RE = re.compile(r'uddg=([^&"\']+)')
 
 
 def compose_image(phone_bytes: bytes) -> Image.Image:
@@ -108,8 +108,21 @@ def buscar_url_produto(modelo: str) -> str | None:
     url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
     resp = requests.get(url, headers=REQUEST_HEADERS, timeout=10)
     resp.raise_for_status()
+
+    # 1) tenta achar um link direto (sem embrulho)
     matches = TUDOCELULAR_LINK_RE.findall(resp.text)
-    return matches[0] if matches else None
+    if matches:
+        return matches[0]
+
+    # 2) tenta achar dentro do parâmetro uddg= do link de redirecionamento
+    #    do DuckDuckGo, decodificando a URL antes de procurar o padrão
+    for wrapped in DUCKDUCKGO_UDDG_RE.findall(resp.text):
+        decoded = unquote(wrapped)
+        found = TUDOCELULAR_LINK_RE.findall(decoded)
+        if found:
+            return found[0]
+
+    return None
 
 
 def baixar_imagem_produto(url_produto: str) -> bytes | None:
