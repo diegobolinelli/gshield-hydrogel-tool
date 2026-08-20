@@ -216,6 +216,47 @@ def api_compor():
     return send_file(buffer, mimetype="image/jpeg", download_name="gshield-hydrogel.jpg")
 
 
+@app.get("/api/debug3/<tag>")
+def api_debug3(tag):
+    """Endpoint TEMPORÁRIO: testa se uma URL qualquer é acessível a partir
+    daqui e faz uma análise estrutural leve (sem devolver o HTML inteiro),
+    pra avaliar rapidamente se um site alternativo bloqueia ou não acesso
+    automatizado. Remover depois."""
+    import re as _re
+
+    url = request.args.get("url")
+    if not url:
+        return jsonify(ok=False, motivo="Passe ?url=..."), 400
+
+    try:
+        resp = requests.get(url, headers=TUDOCELULAR_HEADERS, timeout=15)
+    except requests.exceptions.RequestException as exc:
+        return jsonify(ok=False, motivo=f"{exc.__class__.__name__}: {exc}")
+
+    html = resp.text
+    html_lower = html.lower()
+
+    title_match = _re.search(r"<title[^>]*>([^<]*)</title>", html, _re.IGNORECASE)
+    og_match = OG_IMAGE_RE.search(html)
+    img_srcs = _re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html, _re.IGNORECASE)
+
+    return jsonify(
+        ok=True,
+        url_testada=url,
+        status_code=resp.status_code,
+        tamanho_html=len(html),
+        titulo_pagina=title_match.group(1).strip() if title_match else None,
+        indicios_de_bloqueio=[
+            palavra
+            for palavra in ["captcha", "cloudflare", "access denied", "permission denied", "blocked", "attention required"]
+            if palavra in html_lower
+        ],
+        og_image=og_match.group(1) if og_match else None,
+        primeiras_5_img_src=img_srcs[:5],
+        total_img_tags=len(img_srcs),
+    )
+
+
 @app.get("/api/debug")
 def api_debug():
     """Endpoint TEMPORÁRIO de diagnóstico: busca uma URL qualquer e devolve
