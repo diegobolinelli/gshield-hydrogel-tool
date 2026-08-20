@@ -17,6 +17,12 @@ IMPORTANTE (leia antes de mexer no scraping):
   - A busca em si usa o DuckDuckGo (com "site:gsmarena.com") pra achar a
     página do modelo, porque a busca interna do próprio GSMArena é
     protegida por um Cloudflare Turnstile (captcha) e não dá pra automatizar.
+  - CONFIRMADO EM TESTE REAL: o DuckDuckGo aplica algum tipo de limite/
+    throttling depois de poucas buscas seguidas vindas deste mesmo
+    servidor — passa a devolver HTTP 202 com uma página pequena de
+    "anomalia" em vez dos resultados. Ou seja, a busca automática pode
+    funcionar na primeira tentativa e falhar logo depois. Por isso está
+    sendo testado um endpoint alternativo com o Bing (ver /api/debug5).
   - Mesmo assim, isso é uma tentativa razoável, não uma garantia: sites
     podem mudar de estrutura ou passar a bloquear a qualquer momento. Se
     algo nessa cadeia quebrar, o endpoint retorna ok:false com um motivo,
@@ -70,9 +76,9 @@ REQUEST_HEADERS = {
     "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
 }
 
-# Cabeçalhos mais "de navegador" pra falar com o tudocelular.com, com um
-# Referer condizente com a realidade (a pessoa clicou num resultado do
-# DuckDuckGo pra chegar lá).
+# Cabeçalhos mais "de navegador" pra falar com o tudocelular.com/GSMArena/
+# Bing, com um Referer condizente com a realidade (a pessoa clicou num
+# resultado de busca pra chegar lá).
 TUDOCELULAR_HEADERS = {
     "User-Agent": _UA,
     "Accept": (
@@ -354,6 +360,57 @@ def api_debug4(tag):
     )
     body.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return body
+
+
+@app.get("/api/debug5/<tag>")
+def api_debug5(tag):
+    """Endpoint TEMPORÁRIO: testa se o Bing (em vez do DuckDuckGo) consegue
+    achar a página do modelo no GSMArena a partir deste mesmo servidor, pra
+    comparar se ele sofre o mesmo bloqueio/throttling que vimos no DDG.
+    Não altera buscar_url_produto() ainda — é só um teste isolado.
+    Remover depois."""
+    import re as _re
+
+    modelo = (request.args.get("modelo") or "iPhone 16 Pro Max").strip()
+    query = f"site:gsmarena.com {modelo} specifications"
+    url_bing = f"https://www.bing.com/search?q={quote(query)}"
+
+    try:
+        resp = requests.get(url_bing, headers=TUDOCELULAR_HEADERS, timeout=15)
+    except requests.exceptions.RequestException as exc:
+        return jsonify(ok=False, etapa="bing", motivo=f"{exc.__class__.__name__}: {exc}")
+
+    html = resp.text
+    html_lower = html.lower()
+
+    diretos = GSMARENA_LINK_RE.findall(html)
+    diretos_filtrados = [d for d in diretos if not any(r in d.lower() for r in GSMARENA_EXCLUIR)]
+
+    # todos os hrefs que mencionam gsmarena.com, mesmo que não batam com o
+    # regex de página de ficha técnica, pra ver que formato o Bing usa
+    hrefs_gsmarena = _re.findall(r'href=["\']([^"\']*gsmarena\.com[^"\']*)["\']', html, _re.IGNORECASE)
+
+    pos = html_lower.find("gsmarena.com")
+    contexto = html[max(0, pos - 150) : pos + 250] if pos != -1 else None
+
+    return jsonify(
+        ok=True,
+        modelo_usado=modelo,
+        url_bing_montada=url_bing,
+        status_code=resp.status_code,
+        tamanho_html=len(html),
+        indicios_de_bloqueio=[
+            palavra
+            for palavra in ["captcha", "unusual traffic", "blocked", "verify you are human", "attention required"]
+            if palavra in html_lower
+        ],
+        contem_gsmarena_com=("gsmarena.com" in html_lower),
+        qtd_links_diretos_gsmarena_ficha=len(diretos_filtrados),
+        primeiro_link_direto_ficha=diretos_filtrados[0] if diretos_filtrados else None,
+        qtd_hrefs_gsmarena_qualquer=len(hrefs_gsmarena),
+        primeiros_5_hrefs_gsmarena=hrefs_gsmarena[:5],
+        contexto_primeira_ocorrencia=contexto,
+    )
 
 
 @app.get("/api/debug3/<tag>")
