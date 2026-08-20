@@ -239,6 +239,11 @@ def api_debug3(tag):
     title_match = _re.search(r"<title[^>]*>([^<]*)</title>", html, _re.IGNORECASE)
     og_match = OG_IMAGE_RE.search(html)
     img_srcs = _re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html, _re.IGNORECASE)
+    img_srcs_relevantes = [
+        s for s in img_srcs
+        if not any(x in s.lower() for x in ["logo", "amazon", "icon", ".gif", "static/stores"])
+    ]
+    marcador_specs_photo = "specs-photo" in html_lower
 
     return jsonify(
         ok=True,
@@ -252,8 +257,10 @@ def api_debug3(tag):
             if palavra in html_lower
         ],
         og_image=og_match.group(1) if og_match else None,
-        primeiras_5_img_src=img_srcs[:5],
+        marcador_specs_photo_presente=marcador_specs_photo,
         total_img_tags=len(img_srcs),
+        primeiros_20_img_src=img_srcs[:20],
+        img_srcs_relevantes_filtrados=img_srcs_relevantes[:15],
     )
 
 
