@@ -206,6 +206,8 @@ def api_debug():
     url = request.args.get("url")
     if not url:
         return jsonify(ok=False, motivo="Passe ?url=..."), 400
+    offset = int(request.args.get("offset", 0))
+    limit = int(request.args.get("limit", 15000))
     try:
         resp = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
         return jsonify(
@@ -213,7 +215,7 @@ def api_debug():
             status_code=resp.status_code,
             content_type=resp.headers.get("Content-Type"),
             tamanho_total=len(resp.text),
-            trecho=resp.text[:4000],
+            trecho=resp.text[offset : offset + limit],
         )
     except requests.exceptions.RequestException as exc:
         return jsonify(ok=False, motivo=f"{exc.__class__.__name__}: {exc}")
