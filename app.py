@@ -244,6 +244,24 @@ def api_debug2(tag):
     decodificados = [unquote(u) for u in uddgs[:10]]
     achados_apos_decode = [d for d in decodificados if TUDOCELULAR_LINK_RE.findall(d)]
 
+    url_produto = buscar_url_produto(modelo)
+    imagem_ok = False
+    imagem_tamanho_bytes = None
+    og_image_url = None
+    if url_produto:
+        try:
+            resp_produto = requests.get(url_produto, headers=REQUEST_HEADERS, timeout=15)
+            resp_produto.raise_for_status()
+            match_og = OG_IMAGE_RE.search(resp_produto.text)
+            if match_og:
+                og_image_url = match_og.group(1)
+                img_resp = requests.get(og_image_url, headers=REQUEST_HEADERS, timeout=15)
+                img_resp.raise_for_status()
+                imagem_ok = True
+                imagem_tamanho_bytes = len(img_resp.content)
+        except requests.exceptions.RequestException as exc:
+            og_image_url = f"ERRO: {exc.__class__.__name__}: {exc}"
+
     body = jsonify(
         ok=True,
         execucao_id=str(uuid.uuid4()),  # prova de que essa execução não é cache
@@ -258,6 +276,9 @@ def api_debug2(tag):
         contem_palavra_resultado_zero=("no results" in html.lower() or "sem resultados" in html.lower()),
         qtd_links_diretos=len(diretos),
         qtd_uddg=len(uddgs),
+        og_image_url=og_image_url,
+        imagem_baixada_com_sucesso=imagem_ok,
+        imagem_tamanho_bytes=imagem_tamanho_bytes,
         primeiros_3_uddg_decodificados=decodificados[:3],
         qtd_achados_apos_decode=len(achados_apos_decode),
         resultado_final=buscar_url_produto(modelo),
