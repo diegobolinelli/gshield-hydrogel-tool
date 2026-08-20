@@ -20,9 +20,8 @@ IMPORTANTE (leia antes de mexer no scraping):
   - CONFIRMADO EM TESTE REAL: o DuckDuckGo aplica algum tipo de limite/
     throttling depois de poucas buscas seguidas vindas deste mesmo
     servidor — passa a devolver HTTP 202 com uma página pequena de
-    "anomalia" em vez dos resultados. Ou seja, a busca automática pode
-    funcionar na primeira tentativa e falhar logo depois. Por isso está
-    sendo testado um endpoint alternativo com o Bing (ver /api/debug5).
+    "anomalia" em vez dos resultados. Estamos testando o Bing como
+    alternativa (ver /api/debug5) antes de decidir o caminho final.
   - Mesmo assim, isso é uma tentativa razoável, não uma garantia: sites
     podem mudar de estrutura ou passar a bloquear a qualquer momento. Se
     algo nessa cadeia quebrar, o endpoint retorna ok:false com um motivo,
@@ -390,6 +389,15 @@ def api_debug5(tag):
     # regex de página de ficha técnica, pra ver que formato o Bing usa
     hrefs_gsmarena = _re.findall(r'href=["\']([^"\']*gsmarena\.com[^"\']*)["\']', html, _re.IGNORECASE)
 
+    # "b_algo" é a classe que o Bing usa pra marcar cada resultado orgânico.
+    # "cite" é a tag que mostra a URL "amigável" exibida embaixo do título.
+    qtd_b_algo = html_lower.count("b_algo")
+    pos_b_algo = html_lower.find("b_algo")
+    contexto_primeiro_resultado = html[pos_b_algo : pos_b_algo + 600] if pos_b_algo != -1 else None
+
+    cites = _re.findall(r"<cite[^>]*>(.*?)</cite>", html, _re.IGNORECASE | _re.DOTALL)
+    cites_limpos = [_re.sub(r"<[^>]+>", "", c).strip() for c in cites]
+
     pos = html_lower.find("gsmarena.com")
     contexto = html[max(0, pos - 150) : pos + 250] if pos != -1 else None
 
@@ -410,6 +418,10 @@ def api_debug5(tag):
         qtd_hrefs_gsmarena_qualquer=len(hrefs_gsmarena),
         primeiros_5_hrefs_gsmarena=hrefs_gsmarena[:5],
         contexto_primeira_ocorrencia=contexto,
+        qtd_b_algo=qtd_b_algo,
+        contexto_primeiro_resultado_organico=contexto_primeiro_resultado,
+        qtd_cites=len(cites_limpos),
+        primeiros_10_cites=cites_limpos[:10],
     )
 
 
