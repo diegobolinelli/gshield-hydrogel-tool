@@ -221,6 +221,39 @@ def api_debug():
         return jsonify(ok=False, motivo=f"{exc.__class__.__name__}: {exc}")
 
 
+@app.get("/api/debug2")
+def api_debug2():
+    """Endpoint TEMPORÁRIO: roda a lógica de busca real e devolve só
+    contagens/diagnósticos (sem despejar HTML inteiro), pra investigar
+    por que buscar_url_produto() não está achando link. Remover depois."""
+    modelo = (request.args.get("modelo") or "iPhone 16 Pro").strip()
+    query = f"site:tudocelular.com fichas-tecnicas {modelo}"
+    url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+    try:
+        resp = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
+    except requests.exceptions.RequestException as exc:
+        return jsonify(ok=False, motivo=f"{exc.__class__.__name__}: {exc}")
+
+    html = resp.text
+    diretos = TUDOCELULAR_LINK_RE.findall(html)
+    uddgs = DUCKDUCKGO_UDDG_RE.findall(html)
+    decodificados = [unquote(u) for u in uddgs[:10]]
+    achados_apos_decode = [d for d in decodificados if TUDOCELULAR_LINK_RE.findall(d)]
+
+    return jsonify(
+        ok=True,
+        status_code=resp.status_code,
+        tamanho_html=len(html),
+        contem_palavra_tudocelular=("tudocelular" in html.lower()),
+        contem_palavra_resultado_zero=("no results" in html.lower() or "sem resultados" in html.lower()),
+        qtd_links_diretos=len(diretos),
+        qtd_uddg=len(uddgs),
+        primeiros_3_uddg_decodificados=decodificados[:3],
+        qtd_achados_apos_decode=len(achados_apos_decode),
+        resultado_final=buscar_url_produto(modelo),
+    )
+
+
 @app.get("/")
 def index():
     return send_from_directory("static", "index.html")
