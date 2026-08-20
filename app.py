@@ -198,6 +198,27 @@ def api_compor():
     return send_file(buffer, mimetype="image/jpeg", download_name="gshield-hydrogel.jpg")
 
 
+@app.get("/api/debug")
+def api_debug():
+    """Endpoint TEMPORÁRIO de diagnóstico: busca uma URL qualquer e devolve
+    o status e o começo do HTML, pra investigar bloqueios/formato de resposta
+    sem depender do acesso (bloqueado) do desenvolvedor. Remover depois."""
+    url = request.args.get("url")
+    if not url:
+        return jsonify(ok=False, motivo="Passe ?url=..."), 400
+    try:
+        resp = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
+        return jsonify(
+            ok=True,
+            status_code=resp.status_code,
+            content_type=resp.headers.get("Content-Type"),
+            tamanho_total=len(resp.text),
+            trecho=resp.text[:4000],
+        )
+    except requests.exceptions.RequestException as exc:
+        return jsonify(ok=False, motivo=f"{exc.__class__.__name__}: {exc}")
+
+
 @app.get("/")
 def index():
     return send_from_directory("static", "index.html")
