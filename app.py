@@ -401,6 +401,15 @@ def api_debug5(tag):
     pos = html_lower.find("gsmarena.com")
     contexto = html[max(0, pos - 150) : pos + 250] if pos != -1 else None
 
+    # Pra cada bloco "b_algo" (um resultado orgânico), pega o primeiro
+    # <a href="..."> que aparece dentro dele — deve ser o link de verdade
+    # do resultado (o <cite> só mostra o domínio, não o caminho completo).
+    blocos = html.split("b_algo")[1:6]  # pula o pedaço antes do 1º resultado
+    hrefs_por_resultado = []
+    for bloco in blocos:
+        m = _re.search(r'<a[^>]+href=["\']([^"\']+)["\']', bloco[:2000])
+        hrefs_por_resultado.append(m.group(1) if m else None)
+
     return jsonify(
         ok=True,
         modelo_usado=modelo,
@@ -422,6 +431,7 @@ def api_debug5(tag):
         contexto_primeiro_resultado_organico=contexto_primeiro_resultado,
         qtd_cites=len(cites_limpos),
         primeiros_10_cites=cites_limpos[:10],
+        hrefs_por_resultado_b_algo=hrefs_por_resultado,
     )
 
 
