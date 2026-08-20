@@ -1,9 +1,39 @@
+"""
+GShield - Gerador de imagem Hydrogel + foto do celular
+
+FLUXO
+
+1. Usuário pesquisa um modelo.
+2. O sistema procura primeiro no Supabase.
+3. Se já existir:
+       Supabase -> imagem
+4. Se não existir:
+       identifica o fabricante
+       -> percorre as páginas do catálogo do fabricante no GSMArena
+       -> encontra o aparelho
+       -> abre a página do aparelho
+       -> encontra a imagem principal
+       -> salva no Supabase
+       -> retorna a imagem
+5. Se não encontrar:
+       fallback para busca manual.
+
+IMPORTANTE
+
+- Não usamos DuckDuckGo.
+- Não usamos Bing.
+- Não usamos a busca interna do GSMArena.
+- O catálogo do GSMArena é percorrido diretamente.
+- O sistema pode navegar por várias páginas do catálogo.
+- O Supabase funciona como banco permanente dos modelos já encontrados.
+"""
+
 import base64
 import io
 import os
 import re
 import time
-from urllib.parse import urljoin, urlparse, unquote
+from urllib.parse import urljoin, urlparse
 
 import requests
 from flask import Flask, jsonify, request, send_file, send_from_directory
@@ -31,6 +61,10 @@ CANVAS_SIZE = (2000, 2000)
 
 PHONE_BOX = (70, 220, 900, 1780)
 
+GSMARENA_BASE = "https://www.gsmarena.com"
+
+SUPABASE_TABLE = "devices"
+
 
 # ============================================================================
 # SUPABASE
@@ -50,8 +84,6 @@ SUPABASE_SECRET_KEY = (
     .strip()
 )
 
-SUPABASE_TABLE = "devices"
-
 
 # ============================================================================
 # HTTP
@@ -64,6 +96,7 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+
 GSMARENA_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": (
@@ -72,20 +105,19 @@ GSMARENA_HEADERS = {
         "image/avif,image/webp,image/apng,"
         "*/*;q=0.8"
     ),
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    "Accept-Language": (
+        "pt-BR,pt;q=0.9,en;q=0.8"
+    ),
     "Referer": "https://www.gsmarena.com/",
     "Connection": "keep-alive",
 }
 
+
 SESSION = requests.Session()
-SESSION.headers.update(GSMARENA_HEADERS)
 
-
-# ============================================================================
-# GSMARENA
-# ============================================================================
-
-GSMARENA_BASE = "https://www.gsmarena.com"
+SESSION.headers.update(
+    GSMARENA_HEADERS
+)
 
 
 # ============================================================================
@@ -93,81 +125,76 @@ GSMARENA_BASE = "https://www.gsmarena.com"
 # ============================================================================
 
 BRAND_CATALOGS = {
+
     "apple": "apple-phones-48.php",
+
     "samsung": "samsung-phones-9.php",
+
     "xiaomi": "xiaomi-phones-80.php",
+
     "motorola": "motorola-phones-4.php",
+
     "oneplus": "oneplus-phones-95.php",
+
     "google": "google-phones-107.php",
+
     "oppo": "oppo-phones-82.php",
+
     "realme": "realme-phones-118.php",
+
     "vivo": "vivo-phones-98.php",
+
     "honor": "honor-phones-121.php",
+
     "huawei": "huawei-phones-58.php",
+
     "asus": "asus-phones-46.php",
+
     "sony": "sony-phones-7.php",
+
     "nokia": "nokia-phones-1.php",
+
     "lg": "lg-phones-20.php",
+
     "zte": "zte-phones-62.php",
+
     "nubia": "nubia-phones-109.php",
+
     "tecno": "tecno-phones-120.php",
+
     "infinix": "infinix-phones-119.php",
-    "nothing": "nothing-phones-126.php",
+
+    "nothing": "nothing-phones-128.php",
+
     "lenovo": "lenovo-phones-73.php",
+
     "blackview": "blackview-phones-116.php",
+
     "tcl": "tcl-phones-123.php",
+
     "meizu": "meizu-phones-74.php",
+
     "alcatel": "alcatel-phones-5.php",
+
 }
 
 
-# Quantas páginas no máximo serão consultadas
-# para uma marca.
+# ============================================================================
+# PADRÕES DE URL
+# ============================================================================
+
+DEVICE_URL_RE = re.compile(
+    r"^https?://(?:www\.)?gsmarena\.com/"
+    r"[a-z0-9_()+.-]+-\d+\.php$",
+    re.IGNORECASE,
+)
+
+
+# ============================================================================
+# CACHE EM MEMÓRIA
 #
-# Isso evita ficar preso caso o site altere
-# sua estrutura.
-MAX_CATALOG_PAGES = 20
-
-
-# ============================================================================
-# REGEX
-# ============================================================================
-
-DEVICE_LINK_RE = re.compile(
-    r'href=["\']([^"\']+\.php)["\']',
-    re.IGNORECASE,
-)
-
-IMAGE_RE = re.compile(
-    r'<img[^>]+(?:src|data-src|data-original)=["\']([^"\']+)["\']',
-    re.IGNORECASE,
-)
-
-SPECS_PHOTO_RE = re.compile(
-    r'class=["\'][^"\']*specs-photo-main[^"\']*["\'][^>]*>'
-    r'.{0,5000}?'
-    r'<img[^>]+(?:src|data-src|data-original)=["\']([^"\']+)["\']',
-    re.IGNORECASE | re.DOTALL,
-)
-
-FDN_IMAGE_RE = re.compile(
-    r'https?://fdn[0-9]+\.gsmarena\.com/[^"\'>\s]+',
-    re.IGNORECASE,
-)
-
-OG_IMAGE_RE_1 = re.compile(
-    r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-    re.IGNORECASE,
-)
-
-OG_IMAGE_RE_2 = re.compile(
-    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-    re.IGNORECASE,
-)
-
-
-# ============================================================================
-# CACHE DE MARCAS
+# É apenas uma otimização.
+# O banco verdadeiro é o Supabase.
 # ============================================================================
 
 BRAND_MEMORY_CACHE = {}
@@ -179,29 +206,20 @@ BRAND_CACHE_TTL = 60 * 60 * 6
 # NORMALIZAÇÃO
 # ============================================================================
 
-def normalizar_modelo(modelo: str):
+def normalizar_modelo(modelo: str) -> str:
 
     modelo = (
         modelo or ""
     ).strip().lower()
 
-    modelo = unquote(modelo)
+    modelo = modelo.replace(
+        "_",
+        " ",
+    )
 
     modelo = modelo.replace(
-        "&",
-        " and ",
-    )
-
-    modelo = re.sub(
-        r"[\-_]+",
+        "-",
         " ",
-        modelo,
-    )
-
-    modelo = re.sub(
-        r"[^\w\s\+\.]",
-        " ",
-        modelo,
     )
 
     modelo = re.sub(
@@ -213,81 +231,44 @@ def normalizar_modelo(modelo: str):
     return modelo.strip()
 
 
-def normalizar_nome_comparacao(nome: str):
+def remover_acentos(texto: str) -> str:
 
-    nome = normalizar_modelo(
-        nome
+    import unicodedata
+
+    texto = unicodedata.normalize(
+        "NFD",
+        texto,
     )
 
-    for brand in BRAND_CATALOGS:
-
-        nome = re.sub(
-            rf"^{re.escape(brand)}\s+",
-            "",
-            nome,
-        )
-
-    return nome.strip()
-
-
-# ============================================================================
-# NOME A PARTIR DA URL
-# ============================================================================
-
-def nome_a_partir_da_url(url: str):
-
-    if not url:
-        return ""
-
-    try:
-
-        path = urlparse(
-            url
-        ).path
-
-    except Exception:
-
-        return ""
-
-    filename = path.rsplit(
-        "/",
-        1,
-    )[-1]
-
-    filename = re.sub(
-        r"\.php$",
-        "",
-        filename,
-        flags=re.IGNORECASE,
+    return "".join(
+        char
+        for char in texto
+        if unicodedata.category(char) != "Mn"
     )
 
-    filename = re.sub(
-        r"-\d+$",
-        "",
-        filename,
-    )
 
-    filename = filename.replace(
-        "_",
-        " ",
-    )
-
-    filename = re.sub(
-        r"\s+",
-        " ",
-        filename,
-    )
-
-    return filename.strip()
-
-
-# ============================================================================
-# FABRICANTE
-# ============================================================================
-
-def identificar_fabricante(modelo: str):
+def normalizar_comparacao(texto: str) -> str:
 
     texto = normalizar_modelo(
+        texto
+    )
+
+    texto = remover_acentos(
+        texto
+    )
+
+    return texto
+
+
+# ============================================================================
+# IDENTIFICA FABRICANTE
+# ============================================================================
+
+def identificar_fabricante(
+    modelo: str,
+):
+
+    texto = normalizar_comparacao(
         modelo
     )
 
@@ -297,6 +278,7 @@ def identificar_fabricante(modelo: str):
             rf"\b{re.escape(brand)}\b",
             texto,
         ):
+
             return brand
 
     if re.match(
@@ -306,13 +288,13 @@ def identificar_fabricante(modelo: str):
         return "apple"
 
     if re.match(
-        r"^(galaxy|sm-)",
+        r"^(galaxy|sm[- ]?)",
         texto,
     ):
         return "samsung"
 
     if re.match(
-        r"^(redmi|poco|mi\s)",
+        r"^(redmi|poco|mi)\b",
         texto,
     ):
         return "xiaomi"
@@ -328,48 +310,6 @@ def identificar_fabricante(modelo: str):
         texto,
     ):
         return "motorola"
-
-    if re.match(
-        r"^oneplus\b",
-        texto,
-    ):
-        return "oneplus"
-
-    if re.match(
-        r"^oppo\b",
-        texto,
-    ):
-        return "oppo"
-
-    if re.match(
-        r"^realme\b",
-        texto,
-    ):
-        return "realme"
-
-    if re.match(
-        r"^vivo\b",
-        texto,
-    ):
-        return "vivo"
-
-    if re.match(
-        r"^honor\b",
-        texto,
-    ):
-        return "honor"
-
-    if re.match(
-        r"^huawei\b",
-        texto,
-    ):
-        return "huawei"
-
-    if re.match(
-        r"^asus\b",
-        texto,
-    ):
-        return "asus"
 
     if re.match(
         r"^xperia\b",
@@ -393,7 +333,7 @@ def identificar_fabricante(modelo: str):
 
 
 # ============================================================================
-# SUPABASE
+# SUPABASE HEADERS
 # ============================================================================
 
 def supabase_headers():
@@ -401,7 +341,8 @@ def supabase_headers():
     if not SUPABASE_SECRET_KEY:
 
         raise RuntimeError(
-            "SUPABASE_SERVICE_ROLE_KEY não configurada."
+            "SUPABASE_SERVICE_ROLE_KEY "
+            "não configurada."
         )
 
     return {
@@ -413,7 +354,13 @@ def supabase_headers():
     }
 
 
-def supabase_buscar_modelo(modelo: str):
+# ============================================================================
+# SUPABASE - BUSCAR
+# ============================================================================
+
+def supabase_buscar_modelo(
+    modelo: str,
+):
 
     if not SUPABASE_URL:
         return None
@@ -438,7 +385,7 @@ def supabase_buscar_modelo(modelo: str):
 
     try:
 
-        response = requests.get(
+        response = SESSION.get(
             url,
             headers=supabase_headers(),
             params=params,
@@ -465,6 +412,10 @@ def supabase_buscar_modelo(modelo: str):
 
     return data[0]
 
+
+# ============================================================================
+# SUPABASE - SALVAR
+# ============================================================================
 
 def supabase_salvar_modelo(
     model_name: str,
@@ -497,7 +448,7 @@ def supabase_salvar_modelo(
 
     try:
 
-        response = requests.post(
+        response = SESSION.post(
             url,
             headers=headers,
             json=payload,
@@ -519,7 +470,9 @@ def supabase_salvar_modelo(
 # URL GSMARENA
 # ============================================================================
 
-def eh_url_gsmarena(url: str):
+def eh_url_aparelho_gsmarena(
+    url: str,
+):
 
     if not url:
         return False
@@ -530,30 +483,70 @@ def eh_url_gsmarena(url: str):
             url
         )
 
-        hostname = (
-            parsed.hostname or ""
-        ).lower()
-
     except Exception:
 
         return False
+
+    hostname = (
+        parsed.hostname or ""
+    ).lower()
 
     if hostname not in {
         "gsmarena.com",
         "www.gsmarena.com",
     }:
+
         return False
 
-    return bool(
-        re.search(
-            r"-\d+\.php$",
-            parsed.path,
-            re.IGNORECASE,
-        )
+    caminho = (
+        parsed.path or ""
     )
 
+    # Página de aparelho:
+    #
+    # apple_iphone_13-11102.php
+    #
+    # Não aceitar:
+    # apple-phones-48.php
+    # apple-phones-f-48-14.php
+    # review
+    # news
+    # compare
 
-def url_absoluta(url: str):
+    if not re.search(
+        r"-\d+\.php$",
+        caminho,
+        re.IGNORECASE,
+    ):
+
+        return False
+
+    proibidos = (
+        "phones.php",
+        "-phones-",
+        "-review-",
+        "-news-",
+        "-compare",
+        "compare.",
+        "glossary",
+        "-pictures-",
+    )
+
+    caminho_lower = caminho.lower()
+
+    if any(
+        item in caminho_lower
+        for item in proibidos
+    ):
+
+        return False
+
+    return True
+
+
+def url_absoluta(
+    url: str,
+):
 
     if not url:
         return None
@@ -561,15 +554,18 @@ def url_absoluta(url: str):
     url = url.strip()
 
     if url.startswith("//"):
+
         return "https:" + url
 
     if url.startswith("/"):
+
         return urljoin(
             GSMARENA_BASE,
             url,
         )
 
     if url.startswith("http"):
+
         return url
 
     return urljoin(
@@ -579,50 +575,35 @@ def url_absoluta(url: str):
 
 
 # ============================================================================
-# IMAGEM VÁLIDA
+# EXTRAÇÃO DO NOME
 # ============================================================================
 
-def imagem_url_parece_valida(
-    image_url: str,
+def limpar_nome_aparelho(
+    texto: str,
 ):
 
-    if not image_url:
-        return False
+    if not texto:
+        return ""
 
-    lower = image_url.lower()
-
-    termos_invalidos = (
-        "logo",
-        "fallback",
-        "favicon",
-        "icon",
-        "sprite",
-        "flag",
-        "avatar",
-        "placeholder",
-        "default",
+    texto = re.sub(
+        r"<[^>]+>",
+        " ",
+        texto,
     )
 
-    if any(
-        termo in lower
-        for termo in termos_invalidos
-    ):
-        return False
+    texto = re.sub(
+        r"\s+",
+        " ",
+        texto,
+    )
 
-    if "gsmarena.com" in lower:
+    texto = texto.strip()
 
-        if (
-            "fdn1." in lower
-            or "fdn2." in lower
-            or "/vv/" in lower
-        ):
-            return True
-
-    return True
+    return texto
 
 
 # ============================================================================
-# EXTRAIR DISPOSITIVOS DE UMA PÁGINA
+# PARSER DOS APARELHOS
 # ============================================================================
 
 def extrair_dispositivos_catalogo(
@@ -631,121 +612,89 @@ def extrair_dispositivos_catalogo(
 
     dispositivos = []
 
-    links = DEVICE_LINK_RE.findall(
-        html
+    # ------------------------------------------------------------------------
+    # Procuramos especificamente links que tenham formato de aparelho.
+    # Não usamos todos os <li>, porque os filtros do GSMArena também
+    # aparecem dentro deles.
+    # ------------------------------------------------------------------------
+
+    padrao = re.compile(
+        r'<a[^>]+href=["\']([^"\']+\.php)["\'][^>]*>'
+        r"(.*?)"
+        r"</a>",
+        re.IGNORECASE | re.DOTALL,
     )
 
-    vistos = set()
+    for match in padrao.finditer(
+        html
+    ):
 
-    for href in links:
+        href = match.group(1)
+
+        conteudo = match.group(2)
 
         url = url_absoluta(
             href
         )
 
-        if not eh_url_gsmarena(
+        if not eh_url_aparelho_gsmarena(
             url
         ):
             continue
 
-        if url in vistos:
-            continue
-
-        vistos.add(
-            url
+        nome = limpar_nome_aparelho(
+            conteudo
         )
 
-        nome = ""
-
         # --------------------------------------------------------------------
-        # Tenta encontrar o bloco <li>.
-        # --------------------------------------------------------------------
-
-        bloco_match = re.search(
-            rf"<li[^>]*>.*?{re.escape(href)}.*?</li>",
-            html,
-            re.IGNORECASE | re.DOTALL,
-        )
-
-        bloco = (
-            bloco_match.group(0)
-            if bloco_match
-            else ""
-        )
-
-        if bloco:
-
-            # Primeiro tenta title.
-            title_match = re.search(
-                r'<a[^>]+title=["\']([^"\']+)["\']',
-                bloco,
-                re.IGNORECASE,
-            )
-
-            if title_match:
-
-                nome = title_match.group(
-                    1
-                ).strip()
-
-            # Depois tenta texto do link.
-            if not nome:
-
-                link_match = re.search(
-                    rf'<a[^>]+href=["\']'
-                    rf'{re.escape(href)}'
-                    rf'["\'][^>]*>'
-                    rf'(.*?)</a>',
-                    bloco,
-                    re.IGNORECASE | re.DOTALL,
-                )
-
-                if link_match:
-
-                    nome = re.sub(
-                        r"<[^>]+>",
-                        " ",
-                        link_match.group(
-                            1
-                        ),
-                    )
-
-                    nome = re.sub(
-                        r"\s+",
-                        " ",
-                        nome,
-                    ).strip()
-
-        # --------------------------------------------------------------------
-        # Fallback pelo slug.
+        # O GSMArena possui elementos de filtro que podem gerar links
+        # estranhos. Se não houver nome útil, ignoramos.
         # --------------------------------------------------------------------
 
         if not nome:
+            continue
 
-            nome = nome_a_partir_da_url(
-                url
-            )
+        # --------------------------------------------------------------------
+        # Remove textos de filtro.
+        # --------------------------------------------------------------------
+
+        if (
+            "show only the devices" in
+            nome.lower()
+        ):
+
+            continue
+
+        # --------------------------------------------------------------------
+        # Não aceitar nomes obviamente pertencentes
+        # a reviews.
+        # --------------------------------------------------------------------
+
+        nome_lower = nome.lower()
+
+        if nome_lower.endswith(
+            " review"
+        ):
+
+            continue
+
+        # --------------------------------------------------------------------
+        # Imagem dentro do mesmo <a>.
+        # --------------------------------------------------------------------
+
+        imagens = re.findall(
+            r'(?:src|data-src)=["\']([^"\']+)["\']',
+            conteudo,
+            re.IGNORECASE,
+        )
 
         image_url = None
 
-        if bloco:
+        if imagens:
 
-            imagens = IMAGE_RE.findall(
-                bloco
+            image_url = url_absoluta(
+                imagens[0]
             )
-
-            for imagem in imagens:
-
-                imagem = url_absoluta(
-                    imagem
-                )
-
-                if imagem_url_parece_valida(
-                    imagem
-                ):
-
-                    image_url = imagem
-                    break
 
         dispositivos.append(
             {
@@ -755,39 +704,179 @@ def extrair_dispositivos_catalogo(
             }
         )
 
-    return dispositivos
+    # ------------------------------------------------------------------------
+    # Deduplicação.
+    # ------------------------------------------------------------------------
+
+    resultado = []
+
+    vistos = set()
+
+    for device in dispositivos:
+
+        url = device["url"]
+
+        if url in vistos:
+            continue
+
+        vistos.add(url)
+
+        resultado.append(
+            device
+        )
+
+    return resultado
 
 
 # ============================================================================
-# BAIXAR UMA PÁGINA DO CATÁLOGO
+# DESCOBRIR PÁGINAS DO CATÁLOGO
 # ============================================================================
 
-def baixar_pagina_catalogo(
-    brand: str,
-    pagina: int,
+def extrair_paginas_catalogo(
+    html: str,
+    url_atual: str,
 ):
 
-    slug = BRAND_CATALOGS.get(
-        brand
+    paginas = []
+
+    paginas.append(
+        url_atual
     )
 
-    if not slug:
-        return []
+    # ------------------------------------------------------------------------
+    # Procura links que terminam com .php e que parecem ser paginação.
+    #
+    # Exemplo:
+    #
+    # apple-phones-48-2.php
+    # apple-phones-48-3.php
+    # apple-phones-48-4.php
+    #
+    # ------------------------------------------------------------------------
 
-    if pagina <= 1:
+    padrao = re.compile(
+        r'href=["\']([^"\']+apple-phones[^"\']+\.php)["\']',
+        re.IGNORECASE,
+    )
 
-        url = (
-            f"{GSMARENA_BASE}/"
-            f"{slug}"
+    # A marca não precisa ser apple.
+    # Então usamos uma segunda extração genérica abaixo.
+
+    links = re.findall(
+        r'href=["\']([^"\']+\.php)["\']',
+        html,
+        re.IGNORECASE,
+    )
+
+    base_slug = os.path.basename(
+        urlparse(url_atual).path
+    )
+
+    # Exemplo:
+    # apple-phones-48.php
+    #
+    # Queremos:
+    # apple-phones-48-2.php
+
+    m = re.match(
+        r"^(.+?)-(\d+)\.php$",
+        base_slug,
+        re.IGNORECASE,
+    )
+
+    if not m:
+        return paginas
+
+    prefixo = m.group(1)
+    numero_base = m.group(2)
+
+    prefixo_lower = prefixo.lower()
+
+    for href in links:
+
+        absoluta = url_absoluta(
+            href
         )
 
-    else:
+        if not absoluta:
+            continue
 
-        url = (
-            f"{GSMARENA_BASE}/"
-            f"{slug}"
-            f"?p={pagina}"
+        caminho = os.path.basename(
+            urlparse(
+                absoluta
+            ).path
         )
+
+        caminho_lower = caminho.lower()
+
+        if not caminho_lower.startswith(
+            prefixo_lower + "-"
+        ):
+            continue
+
+        if not caminho_lower.endswith(
+            ".php"
+        ):
+            continue
+
+        # Evita páginas de filtro.
+        if "-f-" in caminho_lower:
+            continue
+
+        # Aceita somente:
+        # prefixo-numero.php
+        # prefixo-numero-numero.php
+
+        if re.match(
+            rf"^{re.escape(prefixo)}-\d+\.php$",
+            caminho,
+            re.IGNORECASE,
+        ):
+
+            if absoluta not in paginas:
+
+                paginas.append(
+                    absoluta
+                )
+
+    # ------------------------------------------------------------------------
+    # Ordena pelo número final.
+    # ------------------------------------------------------------------------
+
+    def numero_pagina(url):
+
+        nome = os.path.basename(
+            urlparse(url).path
+        )
+
+        m2 = re.search(
+            r"-(\d+)\.php$",
+            nome,
+            re.IGNORECASE,
+        )
+
+        if not m2:
+            return 1
+
+        return int(
+            m2.group(1)
+        )
+
+    paginas = sorted(
+        set(paginas),
+        key=numero_pagina,
+    )
+
+    return paginas
+
+
+# ============================================================================
+# BAIXAR UMA PÁGINA
+# ============================================================================
+
+def baixar_html(
+    url: str,
+):
 
     try:
 
@@ -799,24 +888,21 @@ def baixar_pagina_catalogo(
 
     except requests.exceptions.RequestException:
 
-        return []
+        return None
 
     if response.status_code != 200:
 
-        return []
+        return None
 
-    html = response.text
+    if not response.text:
 
-    if not html:
-        return []
+        return None
 
-    return extrair_dispositivos_catalogo(
-        html
-    )
+    return response.text
 
 
 # ============================================================================
-# CARREGAR CATÁLOGO
+# CARREGAR TODAS AS PÁGINAS DO CATÁLOGO
 # ============================================================================
 
 def baixar_catalogo_marca(
@@ -824,6 +910,7 @@ def baixar_catalogo_marca(
 ):
 
     if brand not in BRAND_CATALOGS:
+
         return []
 
     agora = time.time()
@@ -834,231 +921,124 @@ def baixar_catalogo_marca(
 
     if cache:
 
-        timestamp, devices = cache
+        timestamp, dispositivos = cache
 
         if (
             agora - timestamp
             < BRAND_CACHE_TTL
         ):
 
-            return devices
+            return dispositivos
 
-    todos = []
+    slug = BRAND_CATALOGS[
+        brand
+    ]
 
-    urls_vistas = set()
+    primeira_url = (
+        f"{GSMARENA_BASE}/{slug}"
+    )
+
+    html = baixar_html(
+        primeira_url
+    )
+
+    if not html:
+
+        return []
+
+    paginas = extrair_paginas_catalogo(
+        html,
+        primeira_url,
+    )
+
+    dispositivos = []
 
     # ------------------------------------------------------------------------
-    # Percorre as páginas.
+    # A primeira página já foi baixada.
     # ------------------------------------------------------------------------
 
-    for pagina in range(
-        1,
-        MAX_CATALOG_PAGES + 1,
-    ):
+    dispositivos.extend(
+        extrair_dispositivos_catalogo(
+            html
+        )
+    )
 
-        dispositivos = baixar_pagina_catalogo(
-            brand,
-            pagina,
+    # ------------------------------------------------------------------------
+    # Percorre as outras páginas.
+    #
+    # Limitamos a 30 páginas por segurança.
+    # Isso é muito mais do que suficiente para encontrar modelos comuns,
+    # mas evita um loop infinito caso o GSMArena altere a estrutura.
+    # ------------------------------------------------------------------------
+
+    paginas_processadas = {
+        primeira_url
+    }
+
+    for pagina_url in paginas[:30]:
+
+        if pagina_url in paginas_processadas:
+
+            continue
+
+        paginas_processadas.add(
+            pagina_url
         )
 
-        if not dispositivos:
-            break
+        pagina_html = baixar_html(
+            pagina_url
+        )
 
-        novos = 0
+        if not pagina_html:
+            continue
 
-        for device in dispositivos:
-
-            url = device.get(
-                "url"
+        dispositivos.extend(
+            extrair_dispositivos_catalogo(
+                pagina_html
             )
+        )
 
-            if not url:
-                continue
+        # Pequena pausa entre páginas.
+        time.sleep(0.15)
 
-            if url in urls_vistas:
-                continue
+    # ------------------------------------------------------------------------
+    # Deduplicação final.
+    # ------------------------------------------------------------------------
 
-            urls_vistas.add(
-                url
-            )
+    resultado = []
 
-            todos.append(
-                device
-            )
+    vistos = set()
 
-            novos += 1
+    for device in dispositivos:
 
-        # --------------------------------------------------------------------
-        # Se a página não trouxe nenhum
-        # aparelho novo, paramos.
-        # --------------------------------------------------------------------
+        url = device.get(
+            "url"
+        )
 
-        if novos == 0:
-            break
+        if not url:
+            continue
 
-        # --------------------------------------------------------------------
-        # Se encontrou uma quantidade muito
-        # pequena, provavelmente chegamos
-        # ao final.
-        # --------------------------------------------------------------------
+        if url in vistos:
+            continue
 
-        if len(dispositivos) < 5:
-            break
+        vistos.add(url)
+
+        resultado.append(
+            device
+        )
 
     BRAND_MEMORY_CACHE[
         brand
     ] = (
         agora,
-        todos,
+        resultado,
     )
 
-    return todos
+    return resultado
 
 
 # ============================================================================
-# MATCH EXATO
-# ============================================================================
-
-def encontrar_match_exato(
-    procurado: str,
-    dispositivos: list,
-):
-
-    for device in dispositivos:
-
-        nome = normalizar_nome_comparacao(
-            device.get(
-                "name",
-                "",
-            )
-        )
-
-        if nome == procurado:
-            return device
-
-    for device in dispositivos:
-
-        nome_url = normalizar_nome_comparacao(
-            nome_a_partir_da_url(
-                device.get(
-                    "url",
-                    "",
-                )
-            )
-        )
-
-        if nome_url == procurado:
-            return device
-
-    return None
-
-
-# ============================================================================
-# MATCH POR TOKENS
-# ============================================================================
-
-def encontrar_match_tokens(
-    procurado: str,
-    dispositivos: list,
-):
-
-    procurado_tokens = set(
-        procurado.split()
-    )
-
-    if not procurado_tokens:
-        return None
-
-    variantes = {
-        "pro",
-        "max",
-        "plus",
-        "ultra",
-        "mini",
-        "lite",
-        "edge",
-        "fe",
-        "play",
-        "zoom",
-        "neo",
-        "prime",
-        "se",
-        "air",
-    }
-
-    candidatos = []
-
-    for device in dispositivos:
-
-        nomes = [
-            normalizar_nome_comparacao(
-                device.get(
-                    "name",
-                    "",
-                )
-            ),
-            normalizar_nome_comparacao(
-                nome_a_partir_da_url(
-                    device.get(
-                        "url",
-                        "",
-                    )
-                )
-            ),
-        ]
-
-        for nome in nomes:
-
-            if not nome:
-                continue
-
-            tokens = set(
-                nome.split()
-            )
-
-            if not procurado_tokens.issubset(
-                tokens
-            ):
-                continue
-
-            extras = (
-                tokens
-                - procurado_tokens
-            )
-
-            # Se houver uma variante,
-            # não tratamos como o mesmo aparelho.
-            if any(
-                extra in variantes
-                for extra in extras
-            ):
-                continue
-
-            candidatos.append(
-                (
-                    len(extras),
-                    len(tokens),
-                    device,
-                )
-            )
-
-            break
-
-    if not candidatos:
-        return None
-
-    candidatos.sort(
-        key=lambda item: (
-            item[0],
-            item[1],
-        )
-    )
-
-    return candidatos[0][2]
-
-
-# ============================================================================
-# BUSCA NO CATÁLOGO
+# ENCONTRAR MODELO
 # ============================================================================
 
 def encontrar_no_catalogo(
@@ -1066,110 +1046,213 @@ def encontrar_no_catalogo(
     dispositivos: list,
 ):
 
-    procurado = normalizar_nome_comparacao(
+    procurado = normalizar_comparacao(
         modelo
     )
 
     if not procurado:
+
         return None
 
-    # Primeiro: EXATO.
-    encontrado = encontrar_match_exato(
-        procurado,
-        dispositivos,
-    )
+    # ------------------------------------------------------------------------
+    # Remove fabricante.
+    # ------------------------------------------------------------------------
 
-    if encontrado:
-        return encontrado
+    for brand in BRAND_CATALOGS:
 
-    # Segundo: tokens sem variantes.
-    return encontrar_match_tokens(
-        procurado,
-        dispositivos,
-    )
+        procurado = re.sub(
+            rf"^{re.escape(brand)}\s+",
+            "",
+            procurado,
+        )
+
+    # ------------------------------------------------------------------------
+    # 1. EXATO
+    # ------------------------------------------------------------------------
+
+    for device in dispositivos:
+
+        nome = normalizar_comparacao(
+            device.get(
+                "name",
+                "",
+            )
+        )
+
+        if not nome:
+            continue
+
+        for brand in BRAND_CATALOGS:
+
+            nome = re.sub(
+                rf"^{re.escape(brand)}\s+",
+                "",
+                nome,
+            )
+
+        if nome == procurado:
+
+            return device
+
+    # ------------------------------------------------------------------------
+    # 2. Comparação por tokens.
+    #
+    # Importante:
+    #
+    # "iPhone 13"
+    #
+    # NÃO pode encontrar:
+    #
+    # "iPhone 13 Pro"
+    #
+    # porque isso geraria um resultado errado.
+    # ------------------------------------------------------------------------
+
+    procurado_tokens = procurado.split()
+
+    melhor = None
+
+    melhor_score = 0
+
+    for device in dispositivos:
+
+        nome = normalizar_comparacao(
+            device.get(
+                "name",
+                "",
+            )
+        )
+
+        if not nome:
+            continue
+
+        for brand in BRAND_CATALOGS:
+
+            nome = re.sub(
+                rf"^{re.escape(brand)}\s+",
+                "",
+                nome,
+            )
+
+        tokens = nome.split()
+
+        if not tokens:
+            continue
+
+        # --------------------------------------------------------------------
+        # O modelo pesquisado precisa ter exatamente a mesma quantidade
+        # de tokens-base ou estar contido de forma segura.
+        # --------------------------------------------------------------------
+
+        if len(tokens) != len(
+            procurado_tokens
+        ):
+
+            continue
+
+        if tokens == procurado_tokens:
+
+            return device
+
+        intersecao = (
+            set(procurado_tokens)
+            & set(tokens)
+        )
+
+        score = (
+            len(intersecao)
+            / max(
+                len(procurado_tokens),
+                len(tokens),
+            )
+        )
+
+        if score > melhor_score:
+
+            melhor_score = score
+            melhor = device
+
+    if melhor_score >= 0.95:
+
+        return melhor
+
+    return None
 
 
 # ============================================================================
-# IMAGEM DA PÁGINA
+# ENCONTRAR IMAGEM NA PÁGINA DO APARELHO
 # ============================================================================
 
-def extrair_imagem_da_pagina(
-    html: str,
+def encontrar_imagem_pagina_aparelho(
+    device_url: str,
 ):
 
+    html = baixar_html(
+        device_url
+    )
+
     if not html:
+
         return None
 
-    match = SPECS_PHOTO_RE.search(
-        html
-    )
+    # ------------------------------------------------------------------------
+    # 1. specs-photo-main
+    # ------------------------------------------------------------------------
 
-    if match:
+    padroes = [
+
+        r'specs-photo-main.*?'
+        r'<img[^>]+src=["\']([^"\']+)',
+
+        r'specs-photo-main.*?'
+        r'(?:data-src|src)=["\']([^"\']+)',
+
+        r'<meta[^>]+property=["\']og:image["\']'
+        r'[^>]+content=["\']([^"\']+)',
+
+        r'<meta[^>]+content=["\']([^"\']+)'
+        r'[^>]+property=["\']og:image["\']',
+
+    ]
+
+    for padrao in padroes:
+
+        match = re.search(
+            padrao,
+            html,
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        if not match:
+            continue
 
         imagem = url_absoluta(
             match.group(1)
         )
 
-        if imagem_url_parece_valida(
-            imagem
-        ):
-            return imagem
+        if imagem:
 
-    match = OG_IMAGE_RE_1.search(
-        html
-    )
-
-    if not match:
-
-        match = OG_IMAGE_RE_2.search(
-            html
-        )
-
-    if match:
-
-        imagem = url_absoluta(
-            match.group(1)
-        )
-
-        if imagem_url_parece_valida(
-            imagem
-        ):
-            return imagem
-
-    matches = FDN_IMAGE_RE.findall(
-        html
-    )
-
-    for imagem in matches:
-
-        imagem = imagem.rstrip(
-            ".,);"
-        )
-
-        if imagem_url_parece_valida(
-            imagem
-        ):
             return imagem
 
     return None
 
 
-def obter_imagem_do_aparelho(
-    device_url: str,
+# ============================================================================
+# BAIXAR IMAGEM
+# ============================================================================
+
+def baixar_imagem_url(
+    image_url: str,
 ):
 
-    if not device_url:
-        return None
+    if not image_url:
 
-    if not eh_url_gsmarena(
-        device_url
-    ):
         return None
 
     try:
 
         response = SESSION.get(
-            device_url,
+            image_url,
             headers=GSMARENA_HEADERS,
             timeout=20,
         )
@@ -1179,11 +1262,86 @@ def obter_imagem_do_aparelho(
         return None
 
     if response.status_code != 200:
+
         return None
 
-    return extrair_imagem_da_pagina(
-        response.text
+    if not response.content:
+
+        return None
+
+    try:
+
+        image = Image.open(
+            io.BytesIO(
+                response.content
+            )
+        )
+
+        image.verify()
+
+    except Exception:
+
+        return None
+
+    return response.content
+
+
+# ============================================================================
+# OBTER IMAGEM
+# ============================================================================
+
+def obter_imagem_do_device(
+    device,
+):
+
+    # ------------------------------------------------------------------------
+    # Primeiro tenta a imagem que veio do catálogo.
+    # ------------------------------------------------------------------------
+
+    image_url = device.get(
+        "image_url"
     )
+
+    if image_url:
+
+        imagem = baixar_imagem_url(
+            image_url
+        )
+
+        if imagem:
+
+            return imagem, image_url
+
+    # ------------------------------------------------------------------------
+    # Se o catálogo não forneceu imagem ou forneceu o GIF de fallback,
+    # abrimos a página do aparelho.
+    # ------------------------------------------------------------------------
+
+    device_url = device.get(
+        "url"
+    )
+
+    if not device_url:
+
+        return None, None
+
+    imagem_pagina = (
+        encontrar_imagem_pagina_aparelho(
+            device_url
+        )
+    )
+
+    if imagem_pagina:
+
+        imagem = baixar_imagem_url(
+            imagem_pagina
+        )
+
+        if imagem:
+
+            return imagem, imagem_pagina
+
+    return None, None
 
 
 # ============================================================================
@@ -1208,8 +1366,10 @@ def buscar_modelo_novo(
             ),
         }
 
-    dispositivos = baixar_catalogo_marca(
-        brand
+    dispositivos = (
+        baixar_catalogo_marca(
+            brand
+        )
     )
 
     if not dispositivos:
@@ -1223,9 +1383,11 @@ def buscar_modelo_novo(
             ),
         }
 
-    encontrado = encontrar_no_catalogo(
-        modelo,
-        dispositivos,
+    encontrado = (
+        encontrar_no_catalogo(
+            modelo,
+            dispositivos,
+        )
     )
 
     if not encontrado:
@@ -1242,156 +1404,72 @@ def buscar_modelo_novo(
             ),
         }
 
-    nome = (
-        encontrado.get(
-            "name"
-        )
-        or nome_a_partir_da_url(
-            encontrado.get(
-                "url",
-                "",
-            )
+    imagem, image_url = (
+        obter_imagem_do_device(
+            encontrado
         )
     )
 
-    device_url = encontrado.get(
-        "url"
-    )
-
-    image_url = encontrado.get(
-        "image_url"
-    )
-
-    # ------------------------------------------------------------------------
-    # Valida imagem do catálogo.
-    # ------------------------------------------------------------------------
-
-    if not imagem_url_parece_valida(
-        image_url
-    ):
-
-        image_url = None
-
-    # ------------------------------------------------------------------------
-    # Busca imagem na página individual.
-    # ------------------------------------------------------------------------
-
-    if not image_url:
-
-        image_url = obter_imagem_do_aparelho(
-            device_url
-        )
-
-    if not image_url:
+    if not imagem:
 
         return None, {
             "etapa": "imagem",
             "fabricante": brand,
-            "modelo": nome,
-            "url": device_url,
+            "modelo": encontrado.get(
+                "name"
+            ),
+            "device_url": encontrado.get(
+                "url"
+            ),
             "motivo": (
                 "Modelo encontrado, "
-                "mas não consegui localizar "
-                "uma imagem válida."
+                "mas não consegui obter "
+                "a imagem."
             ),
         }
 
-    # ------------------------------------------------------------------------
-    # Salva no Supabase usando o modelo
-    # pesquisado como chave.
-    # ------------------------------------------------------------------------
-
-    normalizado = normalizar_modelo(
-        modelo
+    nome = (
+        encontrado.get(
+            "name"
+        )
+        or modelo
     )
 
-    salvo = supabase_salvar_modelo(
-        model_name=nome,
-        model_normalized=normalizado,
-        device_url=device_url,
-        image_url=image_url,
+    normalizado = (
+        normalizar_modelo(
+            modelo
+        )
+    )
+
+    device_url = (
+        encontrado.get(
+            "url"
+        )
+    )
+
+    salvo = (
+        supabase_salvar_modelo(
+            model_name=nome,
+            model_normalized=normalizado,
+            device_url=device_url,
+            image_url=image_url,
+        )
     )
 
     return {
+        "imagem": imagem,
         "model_name": nome,
         "model_normalized": normalizado,
         "device_url": device_url,
         "image_url": image_url,
         "fabricante": brand,
         "salvo": salvo,
+        "origem": "gsmarena_catalogo",
     }, None
 
 
 # ============================================================================
-# DOWNLOAD DE IMAGEM
-# ============================================================================
-
-def baixar_imagem_url(
-    image_url: str,
-):
-
-    if not image_url:
-        return None
-
-    if not imagem_url_parece_valida(
-        image_url
-    ):
-        return None
-
-    try:
-
-        response = SESSION.get(
-            image_url,
-            headers=GSMARENA_HEADERS,
-            timeout=20,
-        )
-
-    except requests.exceptions.RequestException:
-
-        return None
-
-    if response.status_code != 200:
-        return None
-
-    if not response.content:
-        return None
-
-    try:
-
-        image = Image.open(
-            io.BytesIO(
-                response.content
-            )
-        )
-
-        image.verify()
-
-    except Exception:
-
-        return None
-
-    try:
-
-        image = Image.open(
-            io.BytesIO(
-                response.content
-            )
-        )
-
-        largura, altura = image.size
-
-        if largura < 200 or altura < 200:
-            return None
-
-    except Exception:
-
-        return None
-
-    return response.content
-
-
-# ============================================================================
-# OBTÉM MODELO + IMAGEM
+# FLUXO PRINCIPAL
 # ============================================================================
 
 def obter_modelo_e_imagem(
@@ -1402,16 +1480,20 @@ def obter_modelo_e_imagem(
     # 1. SUPABASE
     # ------------------------------------------------------------------------
 
-    existente = supabase_buscar_modelo(
-        modelo
+    existente = (
+        supabase_buscar_modelo(
+            modelo
+        )
     )
 
     if existente:
 
+        imagem_url = existente.get(
+            "image_url"
+        )
+
         imagem = baixar_imagem_url(
-            existente.get(
-                "image_url"
-            )
+            imagem_url
         )
 
         if imagem:
@@ -1431,44 +1513,17 @@ def obter_modelo_e_imagem(
     # 2. GSMARENA
     # ------------------------------------------------------------------------
 
-    encontrado, erro = buscar_modelo_novo(
-        modelo
+    resultado, erro = (
+        buscar_modelo_novo(
+            modelo
+        )
     )
 
-    if not encontrado:
+    if not resultado:
 
         return None, erro
 
-    imagem = baixar_imagem_url(
-        encontrado[
-            "image_url"
-        ]
-    )
-
-    if not imagem:
-
-        return None, {
-            "etapa": "download",
-            "motivo": (
-                "Modelo encontrado, "
-                "mas não consegui baixar "
-                "uma imagem válida."
-            ),
-        }
-
-    return {
-        "imagem": imagem,
-        "modelo": encontrado[
-            "model_name"
-        ],
-        "url": encontrado[
-            "device_url"
-        ],
-        "origem": "gsmarena_catalogo",
-        "salvo": encontrado[
-            "salvo"
-        ],
-    }, None
+    return resultado, None
 
 
 # ============================================================================
@@ -1477,7 +1532,7 @@ def obter_modelo_e_imagem(
 
 def compose_image(
     phone_bytes: bytes,
-):
+) -> Image.Image:
 
     template = Image.open(
         TEMPLATE_PATH
@@ -1598,7 +1653,9 @@ def api_buscar():
 
         return jsonify(
             ok=False,
-            motivo="Digite o nome do modelo.",
+            motivo=(
+                "Digite o nome do modelo."
+            ),
         ), 400
 
     try:
@@ -1613,8 +1670,13 @@ def api_buscar():
 
         return jsonify(
             ok=False,
-            motivo="Erro interno durante a busca.",
-            detalhe=exc.__class__.__name__,
+            motivo=(
+                "Erro interno durante "
+                "a busca."
+            ),
+            detalhe=(
+                exc.__class__.__name__
+            ),
         ), 500
 
     if not resultado:
@@ -1640,15 +1702,21 @@ def api_buscar():
     return jsonify(
         ok=True,
         imagem_base64=imagem_b64,
-        url_produto=resultado[
+        url_produto=resultado.get(
             "url"
-        ],
-        modelo=resultado[
+        )
+        or resultado.get(
+            "device_url"
+        ),
+        modelo=resultado.get(
             "modelo"
-        ],
-        origem=resultado[
+        )
+        or resultado.get(
+            "model_name"
+        ),
+        origem=resultado.get(
             "origem"
-        ],
+        ),
     )
 
 
@@ -1696,14 +1764,19 @@ def api_compor():
 
                 return jsonify(
                     ok=False,
-                    motivo="Imagem base64 inválida.",
+                    motivo=(
+                        "Imagem base64 inválida."
+                    ),
                 ), 400
 
     if not phone_bytes:
 
         return jsonify(
             ok=False,
-            motivo="Nenhuma imagem de celular recebida.",
+            motivo=(
+                "Nenhuma imagem de "
+                "celular recebida."
+            ),
         ), 400
 
     try:
@@ -1717,7 +1790,8 @@ def api_compor():
         return jsonify(
             ok=False,
             motivo=(
-                f"Não consegui compor a imagem: {exc}"
+                f"Não consegui compor "
+                f"a imagem: {exc}"
             ),
         ), 400
 
@@ -1735,7 +1809,33 @@ def api_compor():
     return send_file(
         buffer,
         mimetype="image/jpeg",
-        download_name="gshield-hydrogel.jpg",
+        download_name=(
+            "gshield-hydrogel.jpg"
+        ),
+    )
+
+
+# ============================================================================
+# DEBUG — GERAL
+# ============================================================================
+
+@app.get("/api/debug")
+def api_debug():
+
+    return jsonify(
+        ok=True,
+        supabase_configurada=bool(
+            SUPABASE_URL
+        ),
+        supabase_secret_configurada=bool(
+            SUPABASE_SECRET_KEY
+        ),
+        fabricantes_disponiveis=len(
+            BRAND_CATALOGS
+        ),
+        cache_marcas=len(
+            BRAND_MEMORY_CACHE
+        ),
     )
 
 
@@ -1750,7 +1850,9 @@ def api_debug_supabase():
 
         return jsonify(
             ok=False,
-            erro="SUPABASE_URL não configurada.",
+            erro=(
+                "SUPABASE_URL não configurada."
+            ),
         )
 
     if not SUPABASE_SECRET_KEY:
@@ -1770,7 +1872,7 @@ def api_debug_supabase():
             f"/rest/v1/{SUPABASE_TABLE}"
         )
 
-        response = requests.get(
+        response = SESSION.get(
             url,
             headers=supabase_headers(),
             params={
@@ -1782,17 +1884,24 @@ def api_debug_supabase():
 
         return jsonify(
             ok=(
-                response.status_code == 200
+                response.status_code
+                == 200
             ),
-            status_code=response.status_code,
-            resposta=response.text[:1000],
+            status_code=(
+                response.status_code
+            ),
+            resposta=(
+                response.text[:1000]
+            ),
         )
 
     except Exception as exc:
 
         return jsonify(
             ok=False,
-            erro=exc.__class__.__name__,
+            erro=(
+                exc.__class__.__name__
+            ),
             detalhe=str(exc),
         )
 
@@ -1808,7 +1917,7 @@ def api_debug_gsmarena():
         request.args.get(
             "modelo"
         )
-        or "iPhone 16 Pro Max"
+        or "iPhone 13"
     ).strip()
 
     brand = identificar_fabricante(
@@ -1836,8 +1945,10 @@ def api_debug_gsmarena():
             resultado
         )
 
-    dispositivos = baixar_catalogo_marca(
-        brand
+    dispositivos = (
+        baixar_catalogo_marca(
+            brand
+        )
     )
 
     resultado[
@@ -1852,9 +1963,11 @@ def api_debug_gsmarena():
         dispositivos
     )
 
-    encontrado = encontrar_no_catalogo(
-        modelo,
-        dispositivos,
+    encontrado = (
+        encontrar_no_catalogo(
+            modelo,
+            dispositivos,
+        )
     )
 
     if not encontrado:
@@ -1868,24 +1981,6 @@ def api_debug_gsmarena():
             resultado
         )
 
-    image_url = encontrado.get(
-        "image_url"
-    )
-
-    if not imagem_url_parece_valida(
-        image_url
-    ):
-
-        image_url = None
-
-    if not image_url:
-
-        image_url = obter_imagem_do_aparelho(
-            encontrado[
-                "url"
-            ]
-        )
-
     resultado[
         "encontrado"
     ] = {
@@ -1895,23 +1990,15 @@ def api_debug_gsmarena():
         "url": encontrado.get(
             "url"
         ),
-        "image_url": image_url,
+        "image_url": encontrado.get(
+            "image_url"
+        ),
     }
 
-    if not image_url:
-
-        resultado["erro"] = (
-            "Modelo encontrado, "
-            "mas nenhuma imagem válida "
-            "foi localizada."
+    imagem, imagem_url = (
+        obter_imagem_do_device(
+            encontrado
         )
-
-        return jsonify(
-            resultado
-        )
-
-    imagem = baixar_imagem_url(
-        image_url
     )
 
     resultado[
@@ -1922,11 +2009,13 @@ def api_debug_gsmarena():
 
     resultado[
         "imagem_bytes"
-    ] = (
-        len(imagem)
-        if imagem
-        else 0
-    )
+    ] = len(
+        imagem
+    ) if imagem else 0
+
+    resultado[
+        "imagem_url_final"
+    ] = imagem_url
 
     return jsonify(
         resultado
@@ -1934,7 +2023,90 @@ def api_debug_gsmarena():
 
 
 # ============================================================================
-# DEBUG — LISTAR MODELOS
+# DEBUG — PAGINAÇÃO
+# ============================================================================
+
+@app.get("/api/debug-paginacao")
+def api_debug_paginacao():
+
+    modelo = (
+        request.args.get(
+            "modelo"
+        )
+        or "iPhone 13"
+    ).strip()
+
+    brand = identificar_fabricante(
+        modelo
+    )
+
+    if not brand:
+
+        return jsonify(
+            ok=False,
+            erro=(
+                "Fabricante não identificado."
+            ),
+        )
+
+    slug = BRAND_CATALOGS.get(
+        brand
+    )
+
+    primeira_url = (
+        f"{GSMARENA_BASE}/{slug}"
+    )
+
+    html = baixar_html(
+        primeira_url
+    )
+
+    if not html:
+
+        return jsonify(
+            ok=False,
+            erro=(
+                "Não consegui acessar "
+                "o catálogo."
+            ),
+        )
+
+    paginas = (
+        extrair_paginas_catalogo(
+            html,
+            primeira_url,
+        )
+    )
+
+    dispositivos_primeira = (
+        extrair_dispositivos_catalogo(
+            html
+        )
+    )
+
+    return jsonify(
+        ok=True,
+        modelo=modelo,
+        fabricante=brand,
+        primeira_pagina=primeira_url,
+        paginas_encontradas=len(
+            paginas
+        ),
+        paginas=paginas,
+        dispositivos_primeira_pagina=len(
+            dispositivos_primeira
+        ),
+        encontrou_modelo_primeira_pagina=bool(
+            encontrar_no_catalogo(
+                modelo,
+                dispositivos_primeira,
+            )
+        ),
+    )
+
+
+# ============================================================================
+# DEBUG — MODELOS ENCONTRADOS
 # ============================================================================
 
 @app.get("/api/debug-modelos")
@@ -1947,8 +2119,19 @@ def api_debug_modelos():
         or "apple"
     ).strip().lower()
 
-    dispositivos = baixar_catalogo_marca(
-        brand
+    if brand not in BRAND_CATALOGS:
+
+        return jsonify(
+            ok=False,
+            erro=(
+                "Marca não cadastrada."
+            ),
+        )
+
+    dispositivos = (
+        baixar_catalogo_marca(
+            brand
+        )
     )
 
     return jsonify(
@@ -1957,26 +2140,7 @@ def api_debug_modelos():
         total=len(
             dispositivos
         ),
-        modelos=[
-            {
-                "name": d.get(
-                    "name"
-                ),
-                "url": d.get(
-                    "url"
-                ),
-                "slug": nome_a_partir_da_url(
-                    d.get(
-                        "url",
-                        "",
-                    )
-                ),
-                "image_url": d.get(
-                    "image_url"
-                ),
-            }
-            for d in dispositivos
-        ],
+        modelos=dispositivos,
     )
 
 
